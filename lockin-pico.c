@@ -3,12 +3,15 @@
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
+#include "hardware/adc.h"
 
 #define CLOCK_FREQ_HZ 270000000
 
 #define PWM_PIN 1
 #define PWM_FREQ 500
 #define DUTY_CYCLE_PERCENT 50
+
+#define ADC_PIN 27
 
 // For an explanation in how the PWM works, visit the URL below
 // https://www.i-programmer.info/programming/hardware/14849-the-pico-in-c-basic-pwm.html?start=1
@@ -38,16 +41,82 @@ void init_pwm() {
     pwm_set_enabled(slice_num, true);
 }
 
+void init_adc() {
+    adc_init();
+    
+    adc_gpio_init(ADC_PIN);
+}
+
+uint16_t read_adc_raw(uint gpio) {
+    // ADC inputs are from 0-3 (GPIO 26-29)
+    adc_select_input(gpio - 26);
+
+    return adc_read();
+}
+
+float read_adc_voltage(uint gpio) {
+    // 12-bit conversion, assume max value == ADC_VREF == 3.3 V
+    const float conversion_factor = 3.3f / (1 << 12);
+
+    uint16_t adc_raw_value = read_adc_raw(gpio);
+
+    return adc_raw_value * conversion_factor;
+}
+
+// Only needed for the systick timer
+#include "hardware/structs/systick.h"
+
+void measure_avg_adc_time_us() {
+    // Register magic to setup the systick timer
+    systick_hw->csr = 0x5;
+    systick_hw->rvr = 0x00FFFFFF;
+
+    #define MAX_ITER 666
+
+    float arr[MAX_ITER];
+    uint accumulator = 0;
+
+    for (uint i = 0; i < MAX_ITER; i++) {
+        // Get the start tick
+        uint32_t start_tick = systick_hw->cvr;
+
+        arr[i] = read_adc_voltage(ADC_PIN);
+
+        // Get the end tick and the difference
+        uint32_t end_tick = systick_hw->cvr;
+        uint32_t number_of_ticks = start_tick - end_tick;
+
+        accumulator += number_of_ticks;
+    }
+
+    // Get the time in microseconds
+    float result = (accumulator / MAX_ITER) * (1000000.0 / CLOCK_FREQ_HZ);
+    printf("Tempo médio da medida do ADC: %f us\n", result);
+
+    // Prints the values
+    printf("[");
+    for (int i = 0; i < MAX_ITER; i++) {
+        if ((i + 1) == MAX_ITER) {
+            printf("%f]\n\n\n", arr[i]);
+        } else {
+            printf("%f, ", arr[i]);
+        }
+    }
+}
+
 int main()
 {
+    // Overclocks the device
     set_sys_clock_hz(CLOCK_FREQ_HZ, true);
 
+    // Initializes the USB stuff
     stdio_init_all();
 
     init_pwm();
+    init_adc();
 
     while (true) {
-        printf("Hello, world!\n");
-        sleep_ms(1000);
+        measure_avg_adc_time_us();
+        sleep_ms(5000);
     }
 }
