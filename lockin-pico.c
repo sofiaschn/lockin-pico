@@ -2,8 +2,9 @@
 #include <math.h>
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
+#include "hardware/clocks.h"
 
-#define CLOCK_FREQ 125000000
+#define CLOCK_FREQ_HZ 270000000
 
 #define PWM_PIN 1
 #define PWM_FREQ 500
@@ -20,11 +21,12 @@ void init_pwm() {
     uint channel = pwm_gpio_to_channel(PWM_PIN);
 
     // Calculate how much we need to divide the clock frequency
-    float clock_divider = ceil(CLOCK_FREQ / (4096 * PWM_FREQ)) / 16;
+    // Using 2048 instead of 4096 as in the website because of the overclock
+    float clock_divider = ceil(CLOCK_FREQ_HZ / (2048 * PWM_FREQ)) / 16;
     pwm_set_clkdiv(slice_num, clock_divider);
 
     // Calculate the wrap value of the PWM counter (how much it counts before resetting)
-    float divided_clock_freq = CLOCK_FREQ / clock_divider;
+    float divided_clock_freq = CLOCK_FREQ_HZ / clock_divider;
     uint16_t counter_wrap = (divided_clock_freq / PWM_FREQ) - 1;
     pwm_set_wrap(slice_num, counter_wrap);
 
@@ -38,6 +40,8 @@ void init_pwm() {
 
 int main()
 {
+    set_sys_clock_hz(CLOCK_FREQ_HZ, true);
+
     stdio_init_all();
 
     init_pwm();
