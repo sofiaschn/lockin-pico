@@ -41,20 +41,15 @@ void init_pwm() {
     pwm_set_enabled(slice_num, true);
 }
 
-// Define the register for the ADC clock source and the ADC clock divisor
-// This will be used for overclocking the ADC. For more info, see URL below
-// https://forums.raspberrypi.com/viewtopic.php?t=365702
-#define CLOCKS_CLK_ADC_CTRL ((uint32_t*) (CLOCKS_BASE + CLOCKS_CLK_ADC_CTRL_OFFSET))
-#define CLOCKS_CLK_ADC_DIV ((uint32_t*) (CLOCKS_BASE + CLOCKS_CLK_ADC_DIV_OFFSET))
-
 void init_adc() {
     adc_init();
     
     adc_gpio_init(ADC_PIN);
 
-    // Set the ADC clock source register to use the system clock and the clock divisor value
-    *CLOCKS_CLK_ADC_CTRL = 0x820;
-    *CLOCKS_CLK_ADC_DIV = 0x200;
+    // Set the ADC clock source register to use the system clock
+    // ADC frequencies over 125 MHz showed distortions around the 2048 mark (half of the 12-bit range)
+    uint adc_frequency_divisor = 2;
+    clock_configure(clk_adc, 0, CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, CLOCK_FREQ_HZ, CLOCK_FREQ_HZ / adc_frequency_divisor);
 }
 
 uint16_t read_adc_raw(uint gpio) {
