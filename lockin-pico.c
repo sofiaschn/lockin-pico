@@ -15,14 +15,15 @@
 
 #define DMA_CHANNEL 0
 
-#define PWM_PIN 1
+#define PWM_PIN 0
 #define PWM_FREQ 500
 #define DUTY_CYCLE_PERCENT 50
 
-#define REFERENCE_ADC_PIN 27
-#define INPUT_ADC_PIN 28
+#define REFERENCE_ADC_PIN 26
+#define INPUT_ADC_PIN (REFERENCE_ADC_PIN + 1)
 
-uint adc_capture_buffer_size = ((4.0 * 1000000 / PWM_FREQ) / (96.0 * 1000000 / ADC_FREQ_HZ)) + 1;
+// ADC capture buffer should fit two periods: one from the reference and another from input
+uint adc_capture_buffer_size = ((2.0 * 1000000 / PWM_FREQ) / (96.0 * 1000000 / ADC_FREQ_HZ)) + 1;
 uint16_t* adc_capture_buffer;
 
 // For an explanation in how the PWM works, visit the URL below
@@ -62,6 +63,10 @@ bool init_adc() {
     // Set the ADC clock source register to use the system clock
     clock_configure(clk_adc, 0, CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, CLOCK_FREQ_HZ, ADC_FREQ_HZ);
 
+    // Sets the ADC to switch between reading reference and input using a mask
+    uint input_mask = 1 << (REFERENCE_ADC_PIN - ADC_BASE_PIN) | 1 << (INPUT_ADC_PIN - ADC_BASE_PIN);
+    adc_set_round_robin(input_mask);
+
     // Set up the ADC FIFO to write every sample to the FIFO, call the DMA interrupt every sample,
     // disable the error bit and maintain 12-bit samples
     adc_fifo_setup(true, true, 1, false, false);
@@ -91,9 +96,9 @@ bool init_adc() {
     dma_channel_configure(DMA_CHANNEL, &cfg, adc_capture_buffer, &adc_hw->fifo, adc_capture_buffer_size, false);
 }
 
-void start_adc_sampling(uint gpio) {
+void start_adc_sampling() {
     // ADC inputs are from 0-3 (GPIO 26-29)
-    adc_select_input(gpio - 26);
+    adc_select_input(REFERENCE_ADC_PIN - ADC_BASE_PIN);
 
     // Reset the write address back to the start of the capture buffer
     dma_channel_set_write_addr(DMA_CHANNEL, adc_capture_buffer, true);
@@ -108,13 +113,24 @@ void start_adc_sampling(uint gpio) {
     adc_fifo_drain();
 }
 
-uint16_t get_average_adc(uint gpio) {
-    start_adc_sampling(gpio);
+// Returns the average ADC value for the reference in the lower 16 bits and for the input on the higher 16 bits
+uint32_t get_average_adc() {
+    start_adc_sampling();
 
-    uint accumulator = 0;
-    for (int i = 0; i < adc_capture_buffer_size; i++) accumulator += adc_capture_buffer[i];
+    // We should guarantee that the number of samples is even (and rounded down) since we're sampling two inputs
+    uint rounded_size = floor(adc_capture_buffer_size / 2) * 2;
 
-    return round(accumulator / adc_capture_buffer_size);
+    uint accumulator_reference = 0;
+    uint accumulator_input = 0;
+    for (int i = 0; i < rounded_size; i += 2) {
+        accumulator_reference += adc_capture_buffer[i];
+        accumulator_input += adc_capture_buffer[i + 1];
+    }
+
+    uint16_t result_reference = round(accumulator_reference / (rounded_size / 2));
+    uint16_t result_input = round(accumulator_input / (rounded_size / 2));
+
+    return result_reference | (result_input << 16);
 }
 
 int main()
@@ -131,8 +147,14 @@ int main()
     if (!success) return 1;
 
     while (true) {
-        uint16_t average_ref = get_average_adc(REFERENCE_ADC_PIN);
-        printf("Tensão média da referência: %f\n", average_ref * 3.3f / (1 << 12));
+        const float conversion_factor = 3.3f / (1 << 12);
+
+        uint32_t average_adc = get_average_adc();
+
+        float average_ref = (average_adc & 0xFFFF) * conversion_factor;
+        float average_input = (average_adc >> 16) * conversion_factor;
+
+        printf("Tensão média da referência: %f V, entrada: %f V\n", average_ref, average_input);
         sleep_ms(1000);
     }
 }
