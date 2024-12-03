@@ -22,6 +22,9 @@
 #define REFERENCE_ADC_PIN 26
 #define INPUT_ADC_PIN (REFERENCE_ADC_PIN + 1)
 
+#define INPUT_SAMPLE_ITERATIONS 256
+#define INPUT_SAMPLE_SIZE 4
+
 // ADC capture buffer should fit two periods: one from the reference and another from input
 uint adc_capture_buffer_size = ((2.0 * 1000000 / PWM_FREQ) / (96.0 * 1000000 / ADC_FREQ_HZ)) + 1;
 uint16_t* adc_capture_buffer;
@@ -133,6 +136,73 @@ uint32_t get_average_adc() {
     return result_reference | (result_input << 16);
 }
 
+int* get_input_samples() {
+    uint32_t average_adc = get_average_adc();
+    uint16_t average_ref = (average_adc & 0xFFFF);
+    uint16_t average_input = (average_adc >> 16);
+
+    // We should guarantee that the number of samples is even (and rounded down) since we're sampling two inputs
+    uint rounded_size = floor(adc_capture_buffer_size / 2) * 2;
+
+    // Calculate the interval between one sample and another
+    double sampling_frequency_us = 96.0 * 1000000 / ADC_FREQ_HZ;
+    double input_sample_interval_us = 1000000 / (INPUT_SAMPLE_SIZE * PWM_FREQ);
+    double sample_index_spacing =  input_sample_interval_us / sampling_frequency_us;
+
+    // Allocate the memory for the samples
+    int* input_samples = malloc(INPUT_SAMPLE_SIZE * sizeof(int));
+    if (input_samples == NULL) {
+        printf("ERROR WHILE ALLOCATING MEMORY FOR INPUT SAMPLES BUFFER!\n");
+
+        return NULL;
+    }
+
+    // Instead of getting the samples in one period, average between multiple ones to remove noise
+    for (int i = 0; i < INPUT_SAMPLE_ITERATIONS; i++) {
+        start_adc_sampling();
+
+        // Initialize the variable containing the index of the first reference sample after zero crossing as -1 (UINT_MAX)
+        uint zero_index = -1;
+
+        uint16_t previous_reference_value = 0;
+        // Initializes the current reference value as the last reference sample
+        uint16_t current_reference_value = adc_capture_buffer[rounded_size - 2];
+        for (int i = 0; i < rounded_size; i += 2) {
+            // Update the loop values
+            previous_reference_value = current_reference_value;
+            current_reference_value = adc_capture_buffer[i];
+
+            // If the previous value is under the average and the current is over, zero crossing has ocurred
+            if (previous_reference_value < average_ref && current_reference_value > average_ref) {
+                zero_index = i;
+                break;
+            }
+        }
+
+        // If the index of the first reference sample is still as UINT_MAX, we couldn't find the zero crossing
+        if (zero_index == -1) {
+            printf("ERROR WHILE SEARCHING FOR ZERO CROSSING ON REFERENCE!\n");
+            continue;
+        }
+
+        // Use modular arithmetic to acquire the samples without overflow, making sure we're getting an input (odd) sample
+        double sample = zero_index + 1;
+        for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
+            uint nearest_odd_sample = (uint) sample % 2 != 0 ? sample : (sample + 1);
+            input_samples[i] += adc_capture_buffer[nearest_odd_sample];
+
+            sample = fmod(sample + sample_index_spacing, rounded_size);
+        }
+    }
+
+    // Get the average of the acquired samples
+    for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
+        input_samples[i] = round(input_samples[i] / INPUT_SAMPLE_ITERATIONS) - average_input;
+    }
+    
+    return input_samples;
+}
+
 int main()
 {
     // Overclocks the device
@@ -155,6 +225,18 @@ int main()
         float average_input = (average_adc >> 16) * conversion_factor;
 
         printf("Tensão média da referência: %f V, entrada: %f V\n", average_ref, average_input);
-        sleep_ms(1000);
+
+        int* input_samples = get_input_samples();
+        if (input_samples == NULL) return 1;
+
+        printf("Samples da entrada: [");
+        for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
+            printf(" %lf", input_samples[i] * conversion_factor);
+        }
+        printf(" ]\n\n");
+
+        free(input_samples);
+
+        sleep_ms(5000);
     }
 }
