@@ -88,7 +88,7 @@ bool init_adc() {
     channel_config_set_dreq(&cfg, DREQ_ADC);
     
     // Allocate the buffer on memory
-    adc_capture_buffer = malloc(adc_capture_buffer_size * sizeof(uint16_t));
+    adc_capture_buffer = calloc(adc_capture_buffer_size, sizeof(uint16_t));
     if (adc_capture_buffer == NULL) {
         printf("ERROR WHILE ALLOCATING MEMORY FOR CAPTURE_BUFFER!\n");
 
@@ -150,7 +150,7 @@ int* get_input_samples() {
     double sample_index_spacing =  input_sample_interval_us / sampling_frequency_us;
 
     // Allocate the memory for the samples
-    int* input_samples = malloc(INPUT_SAMPLE_SIZE * sizeof(int));
+    int* input_samples = calloc(INPUT_SAMPLE_SIZE, sizeof(int));
     if (input_samples == NULL) {
         printf("ERROR WHILE ALLOCATING MEMORY FOR INPUT SAMPLES BUFFER!\n");
 
