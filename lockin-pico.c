@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <tusb.h>
+#include <complex.h>
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
@@ -24,6 +26,9 @@
 
 #define INPUT_SAMPLE_ITERATIONS 1024
 #define INPUT_SAMPLE_SIZE 4
+
+#define RI 9500
+#define RS 100000
 
 // ADC capture buffer should fit two periods: one from the reference and another from input
 uint adc_capture_buffer_size = ((1000000 / PWM_FREQ) / (96.0 * 1000000 / ADC_FREQ_HZ)) + 1;
@@ -116,7 +121,7 @@ void start_adc_sampling() {
     adc_fifo_drain();
 }
 
-int* get_input_samples() {
+int* get_input_samples(int input_iterations) {
     // We should guarantee that the number of samples is even (and rounded down) since we're sampling two inputs
     uint rounded_size = floor(adc_capture_buffer_size / 2) * 2;
 
@@ -133,8 +138,19 @@ int* get_input_samples() {
         return NULL;
     }
 
+    // The size is 3 bytes more than the length (considering the chars '[', ']' and '\0')
+    uint indicator_length = 30;
+    uint indicator_size = indicator_length + 3;
+    char progress_indicator[indicator_size];
+    for (int i = 0; i < indicator_size; i++) {
+        if (i == 0) progress_indicator[i] = '[';
+        else if (i == (indicator_size - 2)) progress_indicator[i] = ']';
+        else if (i == (indicator_size - 1)) progress_indicator[i] = '\0';
+        else progress_indicator[i] = ' ';
+    }
+
     // Instead of getting the samples in one period, average between multiple ones to remove noise
-    for (int i = 0; i < INPUT_SAMPLE_ITERATIONS; i++) {
+    for (int i = 0; i < input_iterations; i++) {
         start_adc_sampling();
 
         // Get the average value of the reference and input values
@@ -179,14 +195,51 @@ int* get_input_samples() {
 
             sample = fmod(sample + sample_index_spacing, rounded_size);
         }
+
+        // Calculate the loop progress to print on the screen
+        uint progress = indicator_length * (i + 1) / input_iterations;
+        uint percentage = 100 * progress / indicator_length;
+        for (int j = 1; j <= progress; j++) {
+            progress_indicator[j] = '=';
+        }
+        printf("\rMeasuring: %s %d%%", progress_indicator, percentage);
     }
+
+    printf("\n");
 
     // Get the average of the acquired samples
     for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
-        input_samples[i] = round(input_samples[i] / INPUT_SAMPLE_ITERATIONS);
+        input_samples[i] = round(input_samples[i] / input_iterations);
     }
     
     return input_samples;
+}
+
+void print_samples(int* samples) {
+    const float conversion_factor = 3.3f / (1 << 12);
+
+    printf("Samples: [");
+    for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
+        printf(" %lf", samples[i] * conversion_factor);
+    }
+    printf(" ]\n");
+}
+
+double complex get_voltage(int* samples) {
+    double quadrature = samples[0] - samples[2];
+    double inphase = samples[1] - samples[3];
+
+    return (inphase + quadrature * I);
+}
+
+double complex calculate_result(int* open_circuit_samples, int* dut_samples) {
+    double complex dut_open_voltage = get_voltage(open_circuit_samples);
+    double complex dut_short_voltage = 0 + 0 * I; // Considering a perfect short
+    double complex dut_voltage = get_voltage(dut_samples);
+
+    double complex result = (RI * RS * (dut_voltage - dut_short_voltage)) / (RI + RS * (dut_open_voltage - dut_voltage));
+
+    return result;
 }
 
 int main()
@@ -202,18 +255,34 @@ int main()
     bool success = init_adc();
     if (!success) return 1;
 
+    // Wait for USB connection
+    while (!tud_cdc_connected()) sleep_ms(100);
+
+    // Clear the screen
+    printf("\e[1;1H\e[2J");
+
+    printf("\n-------------------------------------------------\n");
+    printf("Set up the DUT as open circuit and press Enter...\n");
+    getchar();
+
+    int* open_circuit_samples = get_input_samples(8192);
+    if (open_circuit_samples == NULL) return 1;
+    print_samples(open_circuit_samples);
+
+    printf("\nSet up the DUT as the impedance to be measured and press Enter...\n");
+    getchar();
+
     while (true) {
-        const float conversion_factor = 3.3f / (1 << 12);
+        int* dut_samples = get_input_samples(8192);
+        if (dut_samples == NULL) return 1;
+        print_samples(dut_samples);
 
-        int* input_samples = get_input_samples();
-        if (input_samples == NULL) return 1;
+        double complex result = calculate_result(open_circuit_samples, dut_samples);
+        printf("Result: %lf%+lfi\n", creal(result), cimag(result));
 
-        printf("Samples da entrada: [");
-        for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
-            printf(" %lf", input_samples[i] * conversion_factor);
-        }
-        printf(" ]\n");
+        printf("\nTo measure again, press Enter...\n");
+        getchar();
 
-        free(input_samples);
+        free(dut_samples);
     }
 }
