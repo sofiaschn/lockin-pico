@@ -242,6 +242,18 @@ double complex calculate_result(int* open_circuit_samples, int* dut_samples) {
     return result;
 }
 
+void print_result(double complex result, char component) {
+    double real = creal(result);
+    double imag = cimag(result);
+
+    if (component == 'C' || component == 'c') {
+        float capacitor_value = -1 * 1000000000 / (2 * M_PI * PWM_FREQ * imag);
+        printf("Capacitor value: %f nF\n", capacitor_value);
+    } else {
+        printf("Resistor value: %lf\n", real);
+    }
+}
+
 int main()
 {
     // Overclocks the device
@@ -269,8 +281,9 @@ int main()
     if (open_circuit_samples == NULL) return 1;
     print_samples(open_circuit_samples);
 
-    printf("\nSet up the DUT as the impedance to be measured and press Enter...\n");
-    getchar();
+    printf("\nSet up the DUT as the impedance to be measured...\n");
+    printf("When configured, input R for resistance measurement and C for capacitance...\n");
+    char component = getchar();
 
     while (true) {
         int* dut_samples = get_input_samples(8192);
@@ -278,10 +291,10 @@ int main()
         print_samples(dut_samples);
 
         double complex result = calculate_result(open_circuit_samples, dut_samples);
-        printf("Result: %lf%+lfi\n", creal(result), cimag(result));
+        print_result(result, component);
 
-        printf("\nTo measure again, press Enter...\n");
-        getchar();
+        printf("\nTo measure again, input R for resistance measurement and C for capacitance...\n");
+        component = getchar();
 
         free(dut_samples);
     }
