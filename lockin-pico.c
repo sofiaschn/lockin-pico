@@ -189,9 +189,9 @@ int* get_input_samples(int input_iterations) {
 
         // Use modular arithmetic to acquire the samples without overflow, making sure we're getting an input (odd) sample
         double sample = zero_index + 1;
-        for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
+        for (int j = 0; j < INPUT_SAMPLE_SIZE; j++) {
             uint nearest_odd_sample = (uint) sample % 2 != 0 ? sample : (sample + 1);
-            input_samples[i] += (adc_capture_buffer[nearest_odd_sample] - average_input);
+            input_samples[j] += (adc_capture_buffer[nearest_odd_sample] - average_input);
 
             sample = fmod(sample + sample_index_spacing, rounded_size);
         }
