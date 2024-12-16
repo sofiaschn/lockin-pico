@@ -8,8 +8,10 @@
 #include "hardware/clocks.h"
 #include "hardware/adc.h"
 #include "hardware/dma.h"
+#include "pico/cyw43_arch.h"
+#include "bluetooth_handler.h"
 
-#define CLOCK_FREQ_HZ 270000000
+#define CLOCK_FREQ_HZ 125000000
 
 // ADC frequencies over 135 MHz showed distortions around the 2048 mark (half of the 12-bit range)
 #define ADC_FREQ_DIVIDER 2
@@ -33,6 +35,10 @@
 // ADC capture buffer should fit two periods: one from the reference and another from input
 uint adc_capture_buffer_size = ((1000000 / PWM_FREQ) / (96.0 * 1000000 / ADC_FREQ_HZ)) + 1;
 uint16_t* adc_capture_buffer;
+
+char tmp_str[256] = { 0 };
+
+int dma_channel;
 
 // For an explanation in how the PWM works, visit the URL below
 // https://www.i-programmer.info/programming/hardware/14849-the-pico-in-c-basic-pwm.html?start=1
@@ -80,9 +86,9 @@ bool init_adc() {
     adc_fifo_setup(true, true, 1, false, false);
 
     // Get DMA channel and default config
-    dma_channel_claim(DMA_CHANNEL);
-    dma_channel_start(DMA_CHANNEL);
-    dma_channel_config cfg = dma_channel_get_default_config(DMA_CHANNEL);
+    dma_channel = dma_claim_unused_channel(true);
+    dma_channel_start(dma_channel);
+    dma_channel_config cfg = dma_channel_get_default_config(dma_channel);
 
     // Reading from constant address, writing to incrementing byte addresses, transferring 16 bits
     channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
@@ -95,13 +101,13 @@ bool init_adc() {
     // Allocate the buffer on memory
     adc_capture_buffer = calloc(adc_capture_buffer_size, sizeof(uint16_t));
     if (adc_capture_buffer == NULL) {
-        printf("ERROR WHILE ALLOCATING MEMORY FOR CAPTURE_BUFFER!\n");
+        printf_bluetooth("ERROR WHILE ALLOCATING MEMORY FOR CAPTURE_BUFFER!\n");
 
         return false;
     }
 
     // Configure the DMA channel to read from ADC FIFO and write to capture buffer
-    dma_channel_configure(DMA_CHANNEL, &cfg, adc_capture_buffer, &adc_hw->fifo, adc_capture_buffer_size, false);
+    dma_channel_configure(dma_channel, &cfg, adc_capture_buffer, &adc_hw->fifo, adc_capture_buffer_size, false);
 }
 
 void start_adc_sampling() {
@@ -109,14 +115,14 @@ void start_adc_sampling() {
     adc_select_input(REFERENCE_ADC_PIN - ADC_BASE_PIN);
 
     // Reset the write address back to the start of the capture buffer
-    dma_channel_set_write_addr(DMA_CHANNEL, adc_capture_buffer, true);
+    dma_channel_set_write_addr(dma_channel, adc_capture_buffer, true);
 
     // Start free-running sampling mode
     adc_run(true);
 
     // Once DMA finishes, stop any new conversions from starting, and clean up
     // the FIFO in case the ADC was still mid-conversion
-    dma_channel_wait_for_finish_blocking(DMA_CHANNEL);
+    dma_channel_wait_for_finish_blocking(dma_channel);
     adc_run(false);
     adc_fifo_drain();
 }
@@ -133,21 +139,12 @@ int* get_input_samples(int input_iterations) {
     // Allocate the memory for the samples
     int* input_samples = calloc(INPUT_SAMPLE_SIZE, sizeof(int));
     if (input_samples == NULL) {
-        printf("ERROR WHILE ALLOCATING MEMORY FOR INPUT SAMPLES BUFFER!\n");
+        printf_bluetooth("ERROR WHILE ALLOCATING MEMORY FOR INPUT SAMPLES BUFFER!\n");
 
         return NULL;
     }
 
-    // The size is 3 bytes more than the length (considering the chars '[', ']' and '\0')
-    uint indicator_length = 30;
-    uint indicator_size = indicator_length + 3;
-    char progress_indicator[indicator_size];
-    for (int i = 0; i < indicator_size; i++) {
-        if (i == 0) progress_indicator[i] = '[';
-        else if (i == (indicator_size - 2)) progress_indicator[i] = ']';
-        else if (i == (indicator_size - 1)) progress_indicator[i] = '\0';
-        else progress_indicator[i] = ' ';
-    }
+    printf_bluetooth("Starting measure...\n");
 
     // Instead of getting the samples in one period, average between multiple ones to remove noise
     for (int i = 0; i < input_iterations; i++) {
@@ -183,7 +180,7 @@ int* get_input_samples(int input_iterations) {
 
         // If the index of the first reference sample is still as UINT_MAX, we couldn't find the zero crossing
         if (zero_index == -1) {
-            printf("ERROR WHILE SEARCHING FOR ZERO CROSSING ON REFERENCE!\n");
+            printf_bluetooth("ERROR WHILE SEARCHING FOR ZERO CROSSING ON REFERENCE!\n");
             continue;
         }
 
@@ -195,17 +192,7 @@ int* get_input_samples(int input_iterations) {
 
             sample = fmod(sample + sample_index_spacing, rounded_size);
         }
-
-        // Calculate the loop progress to print on the screen
-        uint progress = indicator_length * (i + 1) / input_iterations;
-        uint percentage = 100 * progress / indicator_length;
-        for (int j = 1; j <= progress; j++) {
-            progress_indicator[j] = '=';
-        }
-        printf("\rMeasuring: %s %d%%", progress_indicator, percentage);
     }
-
-    printf("\n");
 
     // Get the average of the acquired samples
     for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
@@ -213,16 +200,6 @@ int* get_input_samples(int input_iterations) {
     }
     
     return input_samples;
-}
-
-void print_samples(int* samples) {
-    const float conversion_factor = 3.3f / (1 << 12);
-
-    printf("Samples: [");
-    for (int i = 0; i < INPUT_SAMPLE_SIZE; i++) {
-        printf(" %lf", samples[i] * conversion_factor);
-    }
-    printf(" ]\n");
 }
 
 double complex get_voltage(int* samples) {
@@ -248,10 +225,12 @@ void print_result(double complex result, char component) {
 
     if (component == 'C' || component == 'c') {
         float capacitor_value = -1 * 1000000000 / (2 * M_PI * PWM_FREQ * imag);
-        printf("Capacitor value: %f nF\n", capacitor_value);
+        snprintf(tmp_str, sizeof(tmp_str) - 1, "Capacitor value: %f nF\n", capacitor_value);
     } else {
-        printf("Resistor value: %lf\n", real);
+        snprintf(tmp_str, sizeof(tmp_str) - 1, "Resistor value: %lf\n", real);
     }
+
+    printf_bluetooth(tmp_str);
 }
 
 int main()
@@ -262,39 +241,43 @@ int main()
     // Initializes the USB stuff
     stdio_init_all();
 
+    // Initialize CYW43 driver
+    if (cyw43_arch_init()) {
+        printf("cyw43_arch_init() failed.\n");
+        return -1;
+    }
+
+    // Initialize the bluetooth stack
+    btstack_main(0, NULL);
+
     init_pwm();
 
     bool success = init_adc();
     if (!success) return 1;
 
-    // Wait for USB connection
-    while (!tud_cdc_connected()) sleep_ms(100);
+    // Wait for Bluetooth connection
+    wait_connection();
 
-    // Clear the screen
-    printf("\e[1;1H\e[2J");
+    printf_bluetooth("\n-------------------------------------------------\n");
+    printf_bluetooth("Set up the DUT as open circuit and press Enter...\n");
+    getchar_bluetooth();
 
-    printf("\n-------------------------------------------------\n");
-    printf("Set up the DUT as open circuit and press Enter...\n");
-    getchar();
-
-    int* open_circuit_samples = get_input_samples(8192);
+    int* open_circuit_samples = get_input_samples(2048);
     if (open_circuit_samples == NULL) return 1;
-    print_samples(open_circuit_samples);
 
-    printf("\nSet up the DUT as the impedance to be measured...\n");
-    printf("When configured, input R for resistance measurement and C for capacitance...\n");
-    char component = getchar();
+    printf_bluetooth("\nSet up the DUT as the impedance to be measured...\n");
+    printf_bluetooth("When configured, input R for resistance measurement and C for capacitance...\n");
+    char component = getchar_bluetooth();
 
     while (true) {
-        int* dut_samples = get_input_samples(8192);
+        int* dut_samples = get_input_samples(256);
         if (dut_samples == NULL) return 1;
-        print_samples(dut_samples);
 
         double complex result = calculate_result(open_circuit_samples, dut_samples);
         print_result(result, component);
 
-        printf("\nTo measure again, input R for resistance measurement and C for capacitance...\n");
-        component = getchar();
+        printf_bluetooth("\nTo measure again, input R for resistance measurement and C for capacitance...\n");
+        component = getchar_bluetooth();
 
         free(dut_samples);
     }
